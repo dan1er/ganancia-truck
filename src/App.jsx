@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Truck,
   Fuel,
@@ -8,18 +8,79 @@ import {
   Wallet,
   Settings2,
   TrendingUp,
-  MapPin
+  MapPin,
+  ArrowRight,
+  Loader2
 } from 'lucide-react';
+
+const ROAD_FACTOR = 1.3;
+
+function haversineDistance(lat1, lon1, lat2, lon2) {
+  const R = 3958.8; // Earth radius in miles
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * (Math.PI / 180)) *
+    Math.cos(lat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function fetchZipCoords(zip) {
+  const res = await fetch(`https://api.zippopotam.us/us/${zip}`);
+  if (!res.ok) throw new Error(`Zip code "${zip}" not found`);
+  const data = await res.json();
+  return {
+    lat: parseFloat(data.places[0].latitude),
+    lng: parseFloat(data.places[0].longitude),
+    city: data.places[0]['place name'],
+    state: data.places[0]['state abbreviation'],
+  };
+}
+
+const STORAGE_KEY = 'ganancia-truck-config';
+
+const DEFAULTS = {
+  companyFeePct: 22.5,
+  driverPayPct: 30,
+  mpg: 13,
+  dieselPrice: 4.15,
+  avgTollsPerMile: 0.12,
+};
+
+function loadConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    return saved ? { ...DEFAULTS, ...saved } : DEFAULTS;
+  } catch {
+    return DEFAULTS;
+  }
+}
 
 const App = () => {
   const [grossPayment, setGrossPayment] = useState(3500);
   const [miles, setMiles] = useState(800);
 
-  const [companyFeePct, setCompanyFeePct] = useState(22.5);
-  const [driverPayPct, setDriverPayPct] = useState(30);
-  const [mpg, setMpg] = useState(13);
-  const [dieselPrice, setDieselPrice] = useState(4.15);
-  const [avgTollsPerMile, setAvgTollsPerMile] = useState(0.12);
+  const [fromZip, setFromZip] = useState('');
+  const [toZip, setToZip] = useState('');
+  const [zipError, setZipError] = useState('');
+  const [zipLoading, setZipLoading] = useState(false);
+  const [routeInfo, setRouteInfo] = useState(null);
+
+  const saved = loadConfig();
+  const [companyFeePct, setCompanyFeePct] = useState(saved.companyFeePct);
+  const [driverPayPct, setDriverPayPct] = useState(saved.driverPayPct);
+  const [mpg, setMpg] = useState(saved.mpg);
+  const [dieselPrice, setDieselPrice] = useState(saved.dieselPrice);
+  const [avgTollsPerMile, setAvgTollsPerMile] = useState(saved.avgTollsPerMile);
+
+  // Persist config changes to localStorage
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      companyFeePct, driverPayPct, mpg, dieselPrice, avgTollsPerMile,
+    }));
+  }, [companyFeePct, driverPayPct, mpg, dieselPrice, avgTollsPerMile]);
 
   const [results, setResults] = useState({
     companyFee: 0,
@@ -52,6 +113,30 @@ const App = () => {
       margin
     });
   }, [grossPayment, miles, companyFeePct, driverPayPct, mpg, dieselPrice, avgTollsPerMile]);
+
+  const calculateMiles = useCallback(async () => {
+    if (fromZip.length !== 5 || toZip.length !== 5) {
+      setZipError('Enter two valid 5-digit zip codes');
+      return;
+    }
+    setZipError('');
+    setZipLoading(true);
+    setRouteInfo(null);
+    try {
+      const [from, to] = await Promise.all([
+        fetchZipCoords(fromZip),
+        fetchZipCoords(toZip),
+      ]);
+      const straight = haversineDistance(from.lat, from.lng, to.lat, to.lng);
+      const estimated = Math.round(straight * ROAD_FACTOR);
+      setMiles(estimated);
+      setRouteInfo({ from, to, estimated });
+    } catch (err) {
+      setZipError(err.message);
+    } finally {
+      setZipLoading(false);
+    }
+  }, [fromZip, toZip]);
 
   const formatCurrency = (val) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
 
@@ -92,15 +177,60 @@ const App = () => {
                   </div>
                 </div>
 
+                {/* Zip Code Fields */}
                 <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">Millas Totales</label>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">Ruta (Zip Codes)</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={5}
+                      placeholder="Origen"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-center text-sm"
+                      value={fromZip}
+                      onChange={(e) => setFromZip(e.target.value.replace(/\D/g, '').slice(0, 5))}
+                    />
+                    <ArrowRight className="w-5 h-5 text-slate-400 shrink-0" />
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={5}
+                      placeholder="Destino"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all text-center text-sm"
+                      value={toZip}
+                      onChange={(e) => setToZip(e.target.value.replace(/\D/g, '').slice(0, 5))}
+                    />
+                  </div>
+                  <button
+                    onClick={calculateMiles}
+                    disabled={zipLoading || fromZip.length !== 5 || toZip.length !== 5}
+                    className="mt-2 w-full py-2 bg-blue-600 text-white text-sm font-medium rounded-xl hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                  >
+                    {zipLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <MapPin className="w-4 h-4" />}
+                    Calcular Millas
+                  </button>
+                  {zipError && (
+                    <p className="text-red-500 text-xs mt-1.5">{zipError}</p>
+                  )}
+                  {routeInfo && (
+                    <p className="text-emerald-600 text-xs mt-1.5">
+                      {routeInfo.from.city}, {routeInfo.from.state} → {routeInfo.to.city}, {routeInfo.to.state}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-600 mb-1">
+                    Millas Totales
+                    {routeInfo && <span className="text-slate-400 font-normal"> (est.)</span>}
+                  </label>
                   <div className="relative">
                     <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
                     <input
                       type="number"
                       className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                       value={miles}
-                      onChange={(e) => setMiles(Number(e.target.value))}
+                      onChange={(e) => { setMiles(Number(e.target.value)); setRouteInfo(null); }}
                     />
                   </div>
                 </div>
